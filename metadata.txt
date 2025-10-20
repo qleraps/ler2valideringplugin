@@ -6,7 +6,7 @@
 name=LER2 Validering
 qgisMinimumVersion=3.0
 description=Nem adgang til LER2 validering
-version=0.1.1
+version=0.1.2
 author=qLER ApS
 email=morten@qler.dk
 

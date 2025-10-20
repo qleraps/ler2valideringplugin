@@ -1,5 +1,6 @@
 
 
+
 import os
 import re
 import json
@@ -43,6 +44,26 @@ class ler2valideringWidgetValidateDialog(QtWidgets.QDialog, FORM_CLASS):
         #self.groupComboBox.addItem("Forsyningstype/ledningsjer",2)
         self.groupComboBox.addItem("Ledningsjer/forsyningstype", 3)
         """
+        """
+        Afløbsledning
+        Afløbskomponent
+        Vandledning
+        Vandkomponent
+        Anden ledning
+        Anden komponent
+        """
+
+        self.objtypeCombo.addItem("Afløbsledning", "afloebsledning")
+        self.objtypeCombo.addItem("Afløbsledning", "afloebsledning")
+        self.objtypeCombo.addItem("Anden ledning", "andenledning")
+        self.objtypeCombo.addItem("Anden komponent", "andenkomponent")
+        self.objtypeCombo.addItem("Elledning", "elledning")
+        self.objtypeCombo.addItem("Elkomponent", "elkomponent")
+        self.objtypeCombo.addItem("Termisk ledning", "termiskledning")
+        self.objtypeCombo.addItem("Termisk komponent", "termiskkomponent")
+        self.objtypeCombo.addItem("Vandledning", "vandledning")
+        self.objtypeCombo.addItem("Vandkomponent", "vandkomponent")
+
 
         self.validationconfirmed = False
 
@@ -83,8 +104,13 @@ class ler2valideringWidgetValidateDialog(QtWidgets.QDialog, FORM_CLASS):
         self.close()
 
     def setInfo(self, featurecount, objecttype, layer):
-        self.featurecount.setText("Antal feautres: " + str(featurecount))
-        self.objecttype.setText("Objekttype: " + objecttype)
+        self.featurecount.setText("Antal features: " + str(featurecount))
+        if objecttype is False:
+            self.objecttype.setText("Objekttype ikke fundet, der skal vælges en type nedenfor")
+            self.objtypeCombo.setEnabled(True)
+        else:
+            self.objecttype.setText("Objekttype: " + objecttype)
+            self.objtypeCombo.setEnabled(False)
         self.layername.setText("Layer-navn: " + layer.name())
 
     def getForcedObjType(self):
@@ -97,18 +123,6 @@ class ler2valideringWidgetValidateDialog(QtWidgets.QDialog, FORM_CLASS):
 
     def isConfirmed(self):
         return self.validationconfirmed
-
-    def getCRS(self):
-        return self.crsComboBox.currentData()
-
-    def getGroupname(self):
-        return self.groupnameEdit.text()
-
-    def getSendStyling(self):
-        return self.sendStylingCheckBox.checkState()
-
-    def getManyToMulti(self):
-        return self.manyToMultiCheckBox.checkState()
 
     def setIface(self, iface): #, groupname
         self.iface = iface

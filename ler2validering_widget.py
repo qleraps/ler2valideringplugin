@@ -87,9 +87,9 @@ class ler2valideringWidget(QFrame, FORM_CLASS):
         ##self.timer.timeout.connect(self.updateSessions)
         #self.timer.start(120000)  # 60 seconds in milliseconds
 
-        self.resultTable.setColumnCount(4)
+        self.resultTable.setColumnCount(5)
         self.resultTable.setHorizontalHeaderLabels(
-            ['FID', "Fejl", "objectType", "Beskrivelse"]
+            ['FID', "Fejl", "objectType", "Beskrivelse", "layerid"]
         )
         self.resultTable.setSortingEnabled(True)
         # Highlight feature when clicking any cell in a row
@@ -98,6 +98,8 @@ class ler2valideringWidget(QFrame, FORM_CLASS):
         except Exception:
             pass
         self.resultTable.cellClicked.connect(self.onResultRowClicked)
+        self.resultTable.cellDoubleClicked.connect(self.onResultRowDoubleClicked)
+        self.resultTable.setEditTriggers(QTableWidget.NoEditTriggers)
 
         #self.readconfig()
         #self.updateSessions()
@@ -173,6 +175,15 @@ class ler2valideringWidget(QFrame, FORM_CLASS):
             return geom
         return geom
 
+    def _sanitize_null_value(self, value):
+        """
+        Helper function to convert NULL string values to empty strings.
+        Returns empty string if value is "NULL" (after stripping), otherwise returns the value.
+        """
+        if value and isinstance(value, str) and value.strip() == "NULL":
+            return ""
+        return value
+
     def prepareJSON(self, selected_features, layer):
         # Byg GeoJSON FeatureCollection af valgte features inkl. attributter og stabil id
         source_crs = layer.crs()
@@ -207,29 +218,34 @@ class ler2valideringWidget(QFrame, FORM_CLASS):
             properties = {}
             for name in field_names:
                 val = f[name]
+
                 # Convert QVariant to Python native type
                 if hasattr(val, 'toPyObject'):
                     try:
                         val = val.toPyObject()
                     except Exception:
                         pass
+                
                 # Handle None/NULL values
                 if val is None:
-                    properties[name] = None
-                # Convert any remaining non-serializable types
-                elif isinstance(val, (str, int, float, bool)):
-                    properties[name] = val
-                elif isinstance(val, (list, dict)):
+                    properties[name] = ""
+                # Handle native JSON-serializable types (int, float, bool, list, dict)
+                elif isinstance(val, (int, float, bool, list, dict)):
                     properties[name] = val
                 # Handle QDate and QDateTime instances
                 elif isinstance(val, QDateTime):
-                    properties[name] = val.toString("yyyy-MM-dd HH:mm:ss")
+                    properties[name] = self._sanitize_null_value(val.toString("yyyy-MM-dd HH:mm:ss"))
                 elif isinstance(val, QDate):
-                    properties[name] = val.toString("yyyy-MM-dd")
+                    properties[name] = self._sanitize_null_value(val.toString("yyyy-MM-dd"))
+                # Handle string values (including Qt string types like QString)
+                elif isinstance(val, str) or (hasattr(val, 'toString') and callable(getattr(val, 'toString'))):
+                    str_val = str(val) if not isinstance(val, str) else val
+                    properties[name] = self._sanitize_null_value(str_val)
+                # Fallback: convert other types to string
                 else:
-                    # Convert other types to string as fallback
-                    properties[name] = str(val) if val is not None else None
-            properties['geomwkt'] = geom_wkt
+                    properties[name] = self._sanitize_null_value(str(val))
+
+            properties['geomwkt'] = geom_wkt if geom_wkt is not None else ""
             properties.pop('geometri', None)
 
             features_geo.append({
@@ -308,7 +324,16 @@ class ler2valideringWidget(QFrame, FORM_CLASS):
             #self.clientName.show()
             #elf.clientName.setProperty("text", reply['data']['client name'])
 
+        if reply['data']['message'] == 'error':
+            QMessageBox.information(self, "Kan ikke validere", reply['data']["error"])
+            return
+
         self.fillResultTable(reply['data']['errorlist'])
+
+        if len(reply['data']['errorlist']) == 0:
+            QMessageBox.information(self, "Validering ok", "Validering fandt ikke nogen fejl")
+        else:
+            QMessageBox.information(self, "Validering fejl", "Validering fandt " + str(len(reply['data']['errorlist'])) + " fejl")
 
 
     def fillResultTable(self, errorlist):
@@ -331,15 +356,39 @@ class ler2valideringWidget(QFrame, FORM_CLASS):
             column += 1
             item = QTableWidgetItem(errorline['description'])
             self.resultTable.setItem(row, column, item)
+
+            column += 1
+            item = QTableWidgetItem(errorline['layerid'])
+            self.resultTable.setItem(row, column, item)
+
+
             row += 1
+        self.resultTable.setColumnHidden(4, True)
         self.resultTable.resizeColumnsToContents()
 
-    def highlighFeature(self, fid, layer):
+
+    def highlighFeatureSingleClick(self, fid, layer):
+        canvas = self.iface.mapCanvas()
+        f = next(layer.getFeatures(QgsFeatureRequest(fid)), None)
+        if f and not canvas.extent().intersects(f.geometry().boundingBox()):
+            canvas.panToFeatureIds(layer, [fid])
+
+        #canvas.zoomToFeatureIds(layer, [fid])
+        canvas.flashFeatureIds(layer, [fid])
+
+    def highlighFeatureDoubleClick(self, fid, layer):
         canvas = self.iface.mapCanvas()
         canvas.zoomToFeatureIds(layer, [fid])
         canvas.flashFeatureIds(layer, [fid])
+        layer.removeSelection()
 
-    def onResultRowClicked(self, row, column):
+        # Select just the desired feature
+        layer.select(fid)
+
+        # Optional: make sure the map refreshes to show the selection
+        self.iface.mapCanvas().refresh()
+
+    def onResultRowClicked(self, row, doubleclicked=False):
         # Extract fid from first column
         try:
             fid_item = self.resultTable.item(row, 0)
@@ -349,23 +398,11 @@ class ler2valideringWidget(QFrame, FORM_CLASS):
             fid = int(fid_text)
         except Exception:
             return
-
-        # Try to get object type from column 2 to resolve layer name
-        objtype = None
-        obj_item = self.resultTable.item(row, 2)
-        if obj_item is not None:
-            objtype = obj_item.text()
-
         layer = None
         try:
-            if objtype:
-                for lyr in QgsProject.instance().mapLayers().values():
-                    try:
-                        if lyr.name().lower() == str(objtype).lower():
-                            layer = lyr
-                            break
-                    except Exception:
-                        continue
+            layerid = self.resultTable.item(row,4)
+            #QMessageBox.information(self, "Validering ok", layerid.text())
+            layer = QgsProject.instance().mapLayer(layerid.text())
             # Fallback to active layer
             if layer is None and hasattr(self, 'iface') and self.iface is not None:
                 layer = self.iface.activeLayer()
@@ -376,7 +413,13 @@ class ler2valideringWidget(QFrame, FORM_CLASS):
             # No layer to highlight on; silently ignore
             return
 
-        self.highlighFeature(fid, layer)
+        if doubleclicked:
+            self.highlighFeatureDoubleClick(fid, layer)
+        else:
+            self.highlighFeatureSingleClick(fid, layer)
+
+    def onResultRowDoubleClicked(self, row):
+        self.onResultRowClicked(row, doubleclicked=True)
 
 
     def filterresulttable(self):
