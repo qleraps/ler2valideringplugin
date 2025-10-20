@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <ui version="4.0">
- <class>lerplusConfigWidget</class>
- <widget class="QWidget" name="lerplusConfigWidget">
+ <class>ler2valideringConfigWidget</class>
+ <widget class="QWidget" name="ler2valideringConfigWidget">
   <property name="geometry">
    <rect>
     <x>0</x>

@@ -32,17 +32,17 @@ from PyQt5.QtWidgets import QApplication, QMainWindow, QTableWidget, QTableWidge
 from qgis.PyQt.QtGui import QDesktopServices
 from PyQt5.QtGui import QColor
 from qgis.PyQt.QtCore import Qt, QUrl
-#from .lerplus_settings import LERplusSettings
-#from .lerplus_config import *
 from .ler2validering_utils import *
+from .ler2validering_validate import *
 from datetime import datetime
-from PyQt5.QtCore import QTimer
+from PyQt5.QtCore import QTimer, QDate, QDateTime
 from functools import partial
 #from .lerplusnewsession import LERplusNewSession
 import tempfile
 import processing
 import requests
-from qgis.core import QgsCoordinateReferenceSystem, QgsCoordinateTransform, QgsProject
+import json
+from qgis.core import QgsCoordinateReferenceSystem, QgsCoordinateTransform, QgsProject, QgsGeometry, QgsWkbTypes, QgsPointXY
 
 #from .suggester import Suggester
 #from .config import Settings
@@ -87,18 +87,181 @@ class ler2valideringWidget(QFrame, FORM_CLASS):
         ##self.timer.timeout.connect(self.updateSessions)
         #self.timer.start(120000)  # 60 seconds in milliseconds
 
-        self.resulttable.setColumnCount(4)
-        self.resulttable.setHorizontalHeaderLabels(
-            ['FID', "Status", "objectType", "Beskrivelse"]
+        self.resultTable.setColumnCount(4)
+        self.resultTable.setHorizontalHeaderLabels(
+            ['FID', "Fejl", "objectType", "Beskrivelse"]
         )
-        self.resulttable.setSortingEnabled(True)
+        self.resultTable.setSortingEnabled(True)
+        # Highlight feature when clicking any cell in a row
+        try:
+            self.resultTable.cellClicked.disconnect()
+        except Exception:
+            pass
+        self.resultTable.cellClicked.connect(self.onResultRowClicked)
 
-        self.readconfig()
+        #self.readconfig()
         #self.updateSessions()
         self.checkToken()
 
 
 #        self.filterEdit.textChanged.connect(self.filterresulttable)
+
+    def detectObjectType(self, selected_features, layer):
+        # Find the objectType field (case-insensitively)
+        object_type_field = None
+        for field in layer.fields():
+            if field.name().lower() == "objecttype":
+                object_type_field = field.name()
+                break
+        
+        # If field doesn't exist, return False
+        if object_type_field is None:
+            return False
+        
+        # Check if at least one feature has a non-empty value for this field
+        for feature in selected_features:
+            value = feature[object_type_field]
+            # Check if value is not None and not empty string
+            if value is not None and value != "":
+                # Convert QVariant to Python native type if needed
+                if hasattr(value, 'toPyObject'):
+                    try:
+                        value = value.toPyObject()
+                    except Exception:
+                        pass
+                # Return the first non-empty value
+                if value is not None and value != "":
+                    return value
+        
+        # No non-empty value found
+        return False
+        
+
+
+
+    def _single_if_possible(self, geom):
+        """
+        If geometry is multipart but contains only one part, convert it to the
+        corresponding single-part geometry. Otherwise return original geometry.
+        """
+        try:
+            if not geom or not isinstance(geom, QgsGeometry):
+                return geom
+            if not geom.isMultipart():
+                return geom
+
+            gtype = geom.type()
+            # Point geometry
+            if gtype == QgsWkbTypes.PointGeometry:
+                pts = geom.asMultiPoint()
+                if pts and len(pts) == 1:
+                    return QgsGeometry.fromPointXY(pts[0])
+                return geom
+            # Line geometry
+            if gtype == QgsWkbTypes.LineGeometry:
+                lines = geom.asMultiPolyline()
+                if lines and len(lines) == 1:
+                    return QgsGeometry.fromPolylineXY(lines[0])
+                return geom
+            # Polygon geometry
+            if gtype == QgsWkbTypes.PolygonGeometry:
+                polys = geom.asMultiPolygon()
+                if polys and len(polys) == 1:
+                    return QgsGeometry.fromPolygonXY(polys[0])
+                return geom
+        except Exception:
+            return geom
+        return geom
+
+    def prepareJSON(self, selected_features, layer):
+        # Byg GeoJSON FeatureCollection af valgte features inkl. attributter og stabil id
+        source_crs = layer.crs()
+        target_crs = QgsCoordinateReferenceSystem(25832)
+        need_transform = source_crs.authid() != 'EPSG:25832'
+        if need_transform:
+            transform = QgsCoordinateTransform(source_crs, target_crs, QgsProject.instance())
+
+        field_names = [f.name() for f in layer.fields()]
+        features_geo = []
+        for f in selected_features:
+            # Kopiér geometri og transformer hvis nødvendigt
+            geom = QgsGeometry(f.geometry())
+            if need_transform:
+                try:
+                    geom.transform(transform)
+                except Exception as e:
+                    QMessageBox.about(self, "Fejl", f"Kunne ikke transformere geometri for FID {f.id()}: {e}")
+                    return
+            # Simplify multipart geometry to singlepart if it has only one part
+            geom = self._single_if_possible(geom)
+            try:
+                geom_json_obj = json.loads(geom.asJson())
+            except Exception:
+                geom_json_obj = None
+
+            try:
+                geom_wkt = geom.asWkt()
+            except Exception:
+                geom_wkt = None
+
+            properties = {}
+            for name in field_names:
+                val = f[name]
+                # Convert QVariant to Python native type
+                if hasattr(val, 'toPyObject'):
+                    try:
+                        val = val.toPyObject()
+                    except Exception:
+                        pass
+                # Handle None/NULL values
+                if val is None:
+                    properties[name] = None
+                # Convert any remaining non-serializable types
+                elif isinstance(val, (str, int, float, bool)):
+                    properties[name] = val
+                elif isinstance(val, (list, dict)):
+                    properties[name] = val
+                # Handle QDate and QDateTime instances
+                elif isinstance(val, QDateTime):
+                    properties[name] = val.toString("yyyy-MM-dd HH:mm:ss")
+                elif isinstance(val, QDate):
+                    properties[name] = val.toString("yyyy-MM-dd")
+                else:
+                    # Convert other types to string as fallback
+                    properties[name] = str(val) if val is not None else None
+            properties['geomwkt'] = geom_wkt
+            properties.pop('geometri', None)
+
+            features_geo.append({
+                "type": "Feature",
+                "id": int(f.id()),
+                "layer_id": layer.id(),
+                "layer_name": layer.name(),
+                #"geometry": geom_json_obj,
+                #"geomwkt": geom_wkt,
+                "properties": properties
+            })
+
+        feature_collection = {
+            "type": "FeatureCollection",
+            "features": features_geo,
+            "crs": {
+                "type": "name",
+                "properties": {"name": "EPSG:25832" if need_transform else source_crs.authid()}
+            }
+        }
+
+        geojson_str = json.dumps(feature_collection, ensure_ascii=False)
+        # For now, just provide the full GeoJSON code: copy to clipboard and inform user
+        """try:
+            QApplication.clipboard().setText(geojson_str)
+            QMessageBox.information(self, "GeoJSON", "GeoJSON for valgte features er kopieret til udklipsholderen.")
+        except Exception:
+            QMessageBox.information(self, "GeoJSON", geojson_str)
+        """
+
+        return geojson_str
+
 
     def doCheck(self):
 
@@ -107,48 +270,113 @@ class ler2valideringWidget(QFrame, FORM_CLASS):
         if layer is None:
             QMessageBox.about(self, "Fejl", "Ikke noget aktivt layer")
             return
-        QMessageBox.about(self, "Fejl", "Sålangtsågodt")
+        #QMessageBox.about(self, "Fejl", "Sålangtsågodt")
 
         if not hasattr(layer, 'selectedFeatures'):
             QMessageBox.about(self, "Fejl", "Layer har ikke valgte features")
             return
 
-        list = []
-
-        for feature in layer.selectedFeatures():
-            list.append(feature)
-
-        if len(list) == 0:
+        selected_features = list(layer.selectedFeatures())
+        if len(selected_features) == 0:
             QMessageBox.about(self, "Fejl", "Ingen geometri valgt")
             return
 
-        if len(list) > 1:
-            QMessageBox.about(self, "Fejl", "Flere end 1 geometri valgt")
+        # Åbn valideringsdialog
+        self.validatedialog = ler2valideringWidgetValidateDialog(self)
+        self.validatedialog.setIface(self.iface)  # , groupname
+        self.validatedialog.setInfo(len(selected_features), self.detectObjectType(selected_features, layer), layer)
+
+        self.validatedialog.exec_()
+        if not self.validatedialog.isConfirmed():
             return
 
-        mypoly = list[0]
-        geom = mypoly.geometry()
+        forcedobjtype=self.validatedialog.getForcedObjType()
+
+        json_str = self.prepareJSON(selected_features, layer)
 
 
-        wkt = str(geom.asWkt())
-        if wkt.startswith("Polygon") is False:
-            QMessageBox.about(self, "Fejl", "Den valgte geometri skal være POLYGON. Nu er den: " + wkt[0:20])
+
+        data = {
+            'jsonfeatures': json_str,
+            'forcedobjecttype': forcedobjtype
+        }
+
+        reply = make_api_call(self, 'checkfeatures', data)
+        if reply is False:
+            QMessageBox.information(self, "validatejson", "Fejl i API-kald")
+            return
+            #self.clientName.show()
+            #elf.clientName.setProperty("text", reply['data']['client name'])
+
+        self.fillResultTable(reply['data']['errorlist'])
+
+
+    def fillResultTable(self, errorlist):
+        self.resultTable.setRowCount(len(errorlist))
+        row = 0
+        for errorline in errorlist:
+            column = 0
+            item = QTableWidgetItem(str(errorline['id']))
+            #item.setToolTip(str(errorline['ssid']))
+            self.resultTable.setItem(row, column, item)
+
+            column += 1
+            item = QTableWidgetItem(errorline['error'])
+            self.resultTable.setItem(row, column, item)
+
+            column += 1
+            item = QTableWidgetItem(errorline['objecttype'])
+            self.resultTable.setItem(row, column, item)
+
+            column += 1
+            item = QTableWidgetItem(errorline['description'])
+            self.resultTable.setItem(row, column, item)
+            row += 1
+        self.resultTable.resizeColumnsToContents()
+
+    def highlighFeature(self, fid, layer):
+        canvas = self.iface.mapCanvas()
+        canvas.zoomToFeatureIds(layer, [fid])
+        canvas.flashFeatureIds(layer, [fid])
+
+    def onResultRowClicked(self, row, column):
+        # Extract fid from first column
+        try:
+            fid_item = self.resultTable.item(row, 0)
+            fid_text = fid_item.text() if fid_item is not None else None
+            if not fid_text:
+                return
+            fid = int(fid_text)
+        except Exception:
             return
 
-        #QMessageBox.about(self, "Fejl", geom.asWkt())
-        if layer.crs().authid() != 'EPSG:25832':
-            source_crs = layer.crs()
-            target_crs = QgsCoordinateReferenceSystem(25832)
-            transform = QgsCoordinateTransform(source_crs, target_crs, QgsProject.instance())
-            transformed_geom = geom.transform(transform)
-            #QMessageBox.about(self, "Fejl", layer.crs().authid())
-        # EPSG:4326
-        # EPSG:25832
+        # Try to get object type from column 2 to resolve layer name
+        objtype = None
+        obj_item = self.resultTable.item(row, 2)
+        if obj_item is not None:
+            objtype = obj_item.text()
 
+        layer = None
+        try:
+            if objtype:
+                for lyr in QgsProject.instance().mapLayers().values():
+                    try:
+                        if lyr.name().lower() == str(objtype).lower():
+                            layer = lyr
+                            break
+                    except Exception:
+                        continue
+            # Fallback to active layer
+            if layer is None and hasattr(self, 'iface') and self.iface is not None:
+                layer = self.iface.activeLayer()
+        except Exception:
+            layer = None
 
+        if layer is None:
+            # No layer to highlight on; silently ignore
+            return
 
-        return
-
+        self.highlighFeature(fid, layer)
 
 
     def filterresulttable(self):
@@ -181,413 +409,17 @@ class ler2valideringWidget(QFrame, FORM_CLASS):
 
 
     def checkToken(self):
-        return
         settings = QgsSettings()
         token = settings.value("ler2validering/apitoken")
         # QMessageBox.information(self, 'Token', token)
         # QgsMessageLog.logMessage(token)
         if (token != "") and (token is not None):
-            # QgsMessageLog.logMessage(token)
-            # r = requests.get(f'https://backend.lerplus.dk/api/checktoken?apitoken={token}')
-            #    if token is
-            return
-            r = requests.get(API_URLBASE + '/checktoken?apitoken=' + token)
-
-            if not is_valid_json(r.text):
-                QMessageBox.information(self, 'Invalid API-response', r.text)
-                return
-
-            # QMessageBox.information(self, 'API-response', r.text)
-            if r.status_code == 200:
-                #self.apiStatusBox.setProperty("styleSheet", "background-color: rgb(0, 170, 0);")
-                #self.apiStatusLabel.setProperty("text", "API forbundet")
+            reply = make_api_call(self,'checktoken')
+            if reply is not False:
                 self.clientName.show()
-                if settings.value("ler2validering/debugmode") == 1:
-                    QMessageBox.information(self, 'API-response', r.text)
-
-                reply = json.loads(r.text)
-                # QgsMessageLog.logMessage(reply['data']['client name'])
-
                 self.clientName.setProperty("text", reply['data']['client name'])
-                if reply['data']['ler2ok'] == 1:
-                    self.LER2Status.setProperty("text", "LER2-status: OK")
-                    self.LER2Status.setStyleSheet("color:green")
-                else:
-                    self.LER2Status.setProperty("text", "LER2-status: Fejl: " + reply['data']['ler2error'])
-                    self.LER2Status.setStyleSheet("color:red")
-
-                if reply['data']['islive'] == 1:
-                    self.clientIsLive.setProperty("text", "Miljø: LIVE")
-                else:
-                    self.clientIsLive.setProperty("text", "Miljø: EXTEST")
-
             else:
-                # QgsMessageLog.logMessage(str(r.status_code))
-               # self.apiStatusBox.setProperty("styleSheet", "background-color: rgb(170, 0, 0);")
-              #  self.apiStatusLabel.setProperty("text", "API ikke forbundet")
-                if settings.value("ler2validering/debugmode") == 1:
-                    QMessageBox.information(self, 'API-response', r.text)
-                self.LER2Status.setProperty("text", "LER2-status: N/A")
-                self.LER2Status.setStyleSheet("color:red")
-                self.clientIsLive.setProperty("text", "Miljø: N/A")
                 self.clientName.setProperty("text", "N/A")
                 #self.clientName.hide()
 
-    """
-    def readconfig(self):
-        self.settings = Settings() # new config
-        # Old way was storing settings in global scope. Leave advanced options there for now
-        s = QSettings()
-        k = __package__
-
-        # prefix muncodes
-        #muncodes = re.findall(r'\d+', settings.value('kommunefilter'))
-        #areafilter = ','.join(['muncode0'+str(k) for k in muncodes])
-
-        self.config = {
-            'apitoken' : self.settings.value('apitoken'),
-            'debugmode': self.settings.value('debugmode'),
-        }
-
-    """
-
-    def handleNotAuthorized(self):
-        title = self.tr(u'Afvist af LER2validering-backend')
-        message = self.tr(u'Manglende eller ukorrekt token til LER2validering+.')
-        button_text = self.tr(u'Åbn indstillinger')
-        widget = self.iface.messageBar().createMessage(title, message)
-        button = QPushButton(widget)
-        button.setText(button_text)
-        button.pressed.connect(lambda : self.iface.showOptionsDialog(currentPage='LER2validering'))
-        widget.layout().addWidget(button)
-        self.iface.messageBar().pushWidget(widget, level=Qgis.Warning, duration=15)
-
-    def updateSessions(self, force=False):
-        return
-        # QMessageBox.information(self, 'HI')
-        settings = QgsSettings()
-
-        #self.settings.value('token'),
-
-        if self.autopollCheckbox.isChecked() is False:
-            if force is False:
-                return
-
-
-        self.resulttable.clearContents()
-        apitoken = settings.value("ler2validering/apitoken")
-        if apitoken is None:
-            return
-
-        """if force is True:
-            self.updatenowButton.setText("Opdaterer...")
-"""
-        return
-        r = requests.get(API_URLBASE + '/getsessions?apitoken=' + apitoken)
-        if r.status_code != 200:
-            self.updatelabel.setText("Sidst opdateret: fejl ved api-kald, 200")
-            #self.updatenowButton.setText("Tjek nu")
-            return
-
-        if not is_valid_json(r.text):
-            QMessageBox.information(self, 'Invalid API-response', r.text)
-            #self.updatenowButton.setText("Tjek nu")
-            return
-
-       # if settings.value("lerplus/debugmode") == 1:
-        #    QMessageBox.information(self, 'API-response', r.text)
-
-        response = json.loads(r.text)
-        if response['status'] != 'ok':
-            if response['status'] == 'empty':
-                self.resulttable.setItem(0, 0, QTableWidgetItem('Sidst opdateret: ingen tilgængelige besvarelser'))
-                #self.updatelabel.setText("Sidst opdateret: ingen tilgængelige besvarelser")
-            else:
-                #self.resulttable.setItem(0, 0, QTableWidgetItem('Sidst opdateret: fejl ved api-kald, status!=ok/empty'))
-                self.updatelabel.setText("Sidst opdateret: fejl ved api-kald, status!=ok/empty")
-            return
-
-        #self.updatelabel.setText("Sidst opdateret: " + datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-        #self.updatenowButton.setText("Tjek nu")
-        if len(response['data']['sessions']) == 0:
-            self.resulttable.setItem(0, 0, QTableWidgetItem('INgen sessions returneret'))
-            return
-
-        row = 0
-
-        self.resulttable.setRowCount(0)
-
-        buttons = {}
-        for session in response['data']['sessions']:
-            self.resulttable.insertRow(row)
-            self.resulttable.setItem(row, 0, QTableWidgetItem(session['lerrespons']['Id']))
-
-            self.resulttable.setItem(row, 1, QTableWidgetItem(session['statustext']))
-
-            bname = 'button' + session['lerrespons']['Id']
-            # QMessageBox.information(self, 'SUCCESS! API-response', bname)
-            buttons[bname] = QPushButton("Importér")
-            # button =
-            # buttons[bname].clicked.connect(lambda: self.showResult(session['lerrespons']['Id']))
-            buttons[bname].clicked.connect(partial(self.showResult, session['lerrespons']['Id']))
-            self.resulttable.setCellWidget(row, 2, buttons[bname])
-
-            ejercount = QTableWidgetItem(str(session['ejercount']))
-            ejercount.setToolTip(str(session['ejernavnestring']))
-
-            self.resulttable.setItem(row, 3, ejercount)
-
-            resultitem = QTableWidgetItem(str(session['ejerleveret']) + "/" + str(session['ejerforventet']))
-            if session['ejerleveret'] == session['ejerforventet']:
-                resultitem.setBackground(QColor(66, 245, 126))
-            else:
-                resultitem.setBackground(QColor(245, 66, 66))
-            #resultitem.setToolTip(str(session['ejernavnestring']))
-
-            self.resulttable.setItem(row, 4, resultitem)
-
-            self.resulttable.setItem(row, 5, QTableWidgetItem(str(session['ejerudenom'])))
-
-            self.resulttable.setItem(row, 6, QTableWidgetItem(session['description']))
-
-            bname = 'kortbutton' + session['lerrespons']['Id']
-            # QMessageBox.information(self, 'SUCCESS! API-response', bname)
-            buttons[bname] = QPushButton("Vis i LER kortviser")
-            # button =
-            # buttons[bname].clicked.connect(lambda: self.showResult(session['lerrespons']['Id']))
-            buttons[bname].clicked.connect(partial(self.showKortviser, session['lerrespons']['Id'], session['GUID']))
-            self.resulttable.setCellWidget(row, 7, buttons[bname])
-
-            bname = 'zipbutton' + session['lerrespons']['Id']
-            buttons[bname] = QPushButton("Hent")
-            buttons[bname].clicked.connect(partial(self.downloadSession, session['ssid'], 'zip'))
-            self.resulttable.setCellWidget(row, 8, buttons[bname])
-
-            bname = 'gmlbutton' + session['lerrespons']['Id']
-            buttons[bname] = QPushButton("Hent")
-            buttons[bname].clicked.connect(partial(self.downloadSession, session['ssid'], 'gml'))
-            self.resulttable.setCellWidget(row, 9, buttons[bname])
-
-            bname = 'dgnbutton' + session['lerrespons']['Id']
-            buttons[bname] = QPushButton("Hent")
-            buttons[bname].clicked.connect(partial(self.downloadSession, session['ssid'], 'dgn'))
-            self.resulttable.setCellWidget(row, 10, buttons[bname])
-
-            bname = 'gpkgbutton' + session['lerrespons']['Id']
-            buttons[bname] = QPushButton("Hent")
-            buttons[bname].clicked.connect(partial(self.downloadSession, session['ssid'], 'gpkg'))
-            self.resulttable.setCellWidget(row, 11, buttons[bname])
-
-
-
-
-            row = row + 1
-
-        self.resulttable.resizeColumnsToContents()
-        #self.resulttable.horizontalHeader().setStretchLastSection(True)
-        return
-
-    def downloadSession(self, ssid, type):
-        return
-        token = get_download_token(self, ssid)
-        if token is False:
-            return
-        #QMessageBox.information(self, 'token', token)
-
-        url = 'https://backend.lerplus.dk/download/' + type + '/' + token
-        qturl = QUrl(url)  # Replace with your desired URL
-        QDesktopServices.openUrl(qturl)
-
-    def showKortviser(self, lerid, guid):
-        return
-        url = 'https://kortviser.ler.dk/?diggingRequestNr=' + lerid + '&ledningspakkeGuid=' + guid
-        qturl = QUrl(url)  # Replace with your desired URL
-        QDesktopServices.openUrl(qturl)
-
-    def showResult(self, lerid):
-        return
-        # QMessageBox.information(self, 'showresult', lerid)
-
-        reply = QMessageBox.question(self, 'Afsendelse',
-                                     'Er du sikker på du vil importere ledningsdata fra lerid=' + lerid + '?',
-                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-        if reply == QMessageBox.No:
-            return
-
-        settings = QgsSettings()
-        token = settings.value("ler2validering/apitoken")
-        return
-        r = requests.get(API_URLBASE + '/getpgresults?apitoken=' + token + '&lernr=' + lerid)
-        # QMessageBox.information(self, 'ERROR! API-response', str(r.status_code))
-
-        if not is_valid_json(r.text):
-            QMessageBox.information(self, 'Invalid API-response', r.text)
-            return
-
-        if r.status_code != 200:
-            QMessageBox.information(self, 'ERROR! API-response', str(r.status_codestr))
-
-        if inDebugMode() is True:
-            QMessageBox.information(self, 'SUCCESS! API-response', r.text)
-
-        response = json.loads(r.text)
-
-        # QMessageBox.information(self, '', json.dumps(response['data']['session']))
-        groupname = response['data']['session']['description'] + ' (LERID ' + lerid + ')'
-        schema = 'lerplus' + lerid
-
-        connection_info = {
-            'connectionName': groupname + ' connection',
-            'host': 'backend.lerplus.dk',  # Replace with your PostGIS host
-            'database': response['data']['pginfo']['dbname'],  # Replace with your database name
-            'username': response['data']['pginfo']['username'],  # Replace with your PostGIS username
-            'password': response['data']['pginfo']['password'],  # Replace with your PostGIS password
-            'schema': schema,  # Replace with your schema name if not 'public'
-            'table': 'your_table_name',  # Replace with your table name
-            'geom_column': 'wkb_geometry'  # Replace with your geometry column name
-        }
-
-        # layer_group = QgsLayerTreeGroup(groupname)
-        root = QgsProject.instance().layerTreeRoot()
-
-        # eksisterer det allerede?
-        layer_group = root.findGroup(groupname)
-
-        if not layer_group:
-            # ellers opret gruppen
-            # layer_group = root.addGroup(groupname)
-            layer_group = root.insertGroup(0, groupname)
-        else:
-            # Slet alle lag, så der opdateres i stedet
-            for child in layer_group.children():
-                if isinstance(child, QgsLayerTreeLayer):
-                    QgsProject.instance().removeMapLayer(child.layerId())
-
-        #bufferzoner = layer_group.addGroup("Bufferzoner")
-
-        uri = QgsDataSourceUri()
-        uri.setConnection(
-            connection_info['host'],
-            '5432',
-            connection_info['database'],
-            connection_info['username'],
-            connection_info['password']
-        )
-        # uri_str=uri.uri()
-        # QgsProject.instance().writeEntry("PostgreSQL/connections", groupname+' PG connection', uri_str)
-
-        # styles_directory = os.path.join(os.path.dirname(__file__), 'styles')
-
-        # Construct the absolute path to the file
-        # sld_file_path = os.path.join(styles_directory, 'styles.sld')
-
-        # = "styles/"
-        # vandtest =  os.path.join(styles_directory, 'vandtest_qml.qml')
-        # redtest = os.path.join(styles_directory, 'redtest.qml')
-        # elledning = os.path.join(styles_directory, 'Elledning.qml')
-        # redtest = "styles/redtest.qml"
-        graveforesp_layer = ''
-        for table in response['data']['tables']:
-
-            if table['tablename'] == 'informationsressource':
-                continue
-            if table['tablename'] == 'kontaktprofil':
-                continue
-            if table['tablename'] == 'utilityowner':
-                continue
-            if table['tablename'] == 'utilitypackageinfo':
-                continue
-
-            uri.setDataSource(
-                connection_info['schema'],
-                table['tablename'],
-                connection_info['geom_column'],
-                ""
-            )
-            uri.setSrid('25832')
-
-            # QMessageBox.information(self, 'Layer failed to load!', uri.uri())
-            # Create a new PostGIS layer
-            postgis_layer = QgsVectorLayer(uri.uri(), table['tablename'].capitalize(), 'postgres')
-
-            # ler:" +
-
-            if not postgis_layer.isValid():
-                # QMessageBox.information(self, 'Layer failed to load!', 'dont know why')
-                tis = 0
-            else:
-                # QMessageBox.information(self, 'Layer field names', ''.join(map(str, postgis_layer.fields().names())))
-
-                if table['tablename'] == "graveforesp":
-                    graveforesp_layer = postgis_layer
-                    continue
-
-                new_layer = QgsProject.instance().addMapLayer(postgis_layer, False)
-
-                # with open(sld_file_path) as f:
-                #                    lines = f.readlines()
-
-                # new_layer.loadSldStyle(sld_file_path)
-
-                if table['layerstyle'] != "":
-                    temp = tempfile.NamedTemporaryFile('w')
-                    tmpname = temp.name
-                    temp.close()
-                    tmpfile = open(tmpname, "w")
-                    # kan skrive string fordi den ikke blev åbnet som binær (default open er 'w+b')
-                    tmpfile.write(table['layerstyle'])
-                    tmpfile.close()
-                    # print(tmpname)
-                    new_layer.loadNamedStyle(tmpname)
-
-                    # clean up
-                    os.remove(tmpname)
-                    # QMessageBox.information(self, 'loadNamesStyle', type(table['layerstyle']))
-                    # print(table['layerstyle'])
-
-                if table['tablename'] == "elledning":
-                    buffer_distance = 10  # Use the appropriate distance units for your data
-
-                    # Create a buffer around the PostGIS layer
-                    buffer_layer = QgsProcessingFeatureSourceDefinition(new_layer.id())
-                    params = {
-                        'INPUT': buffer_layer,
-                        'DISTANCE': buffer_distance,
-                        'SEGMENTS': 5,  # Number of segments to approximate curves in the buffer
-                        'OUTPUT': 'memory:'
-                        # You can also specify a file path if you want to save the buffer as a new layer
-                    }
-
-                    # Run the buffer algorithm
-                    # processing.core.Processing.initialize()
-                    result = processing.run("native:buffer", params)
-
-                    # Access the resulting buffer layer
-                    # buffered_layer = QgsProcessingFeatureSourceDefinition("memory:").source()
-                    buffered_layer = result['OUTPUT']
-                  #  print(type(buffered_layer))
-                   # if buffered_layer:
-                        # Add the buffered layer to the QGIS project
-                        # QgsProject.instance().addMapLayer(buffered_layer)
-                        #bufferzoner.addLayer(buffered_layer)
-                  #  else:
-                      #  print("Buffered layer not found in memory.")
-
-                layer_group.addLayer(new_layer)
-                # new_layer.loadNamedStyle(elledning)
-                # style_manager.loadStyle(new_layer, sld_file_path)
-                # style_manager = QgsMapLayerStyleManager(new_layer)
-                # style_manager.loadFromString(lines)
-
-                # Refresh the layer to see the changes
-                # new_layer.triggerRepaint()
-                self.iface.mapCanvas().refresh()
-
-        if graveforesp_layer != '':
-            # QMessageBox.information(self, 'getting to graveforesp!', 'dont know why')
-            new_layer = QgsProject.instance().addMapLayer(graveforesp_layer, False)
-            layer_group.addLayer(new_layer)
-            QgsProject.instance().layerTreeRoot().findLayer(graveforesp_layer.id()).setItemVisibilityChecked(False)
-
-        return
 

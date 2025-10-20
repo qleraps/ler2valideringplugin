@@ -6,14 +6,14 @@
 name=LER2 Validering
 qgisMinimumVersion=3.0
 description=Nem adgang til LER2 validering
-version=1.0.0
+version=0.1.1
 author=qLER ApS
 email=morten@qler.dk
 
 about=En plugin, der sammen med en konto hos ler2validering.dk giver mulighed for at validere attributter ift. LER2's krav direkte i qGIS
 
-#tracker=http://bugs
-repository=https://plugins.ler2validering.dk
+tracker=https://github.com/qleraps/ler2valideringplugin/issues
+repository=https://github.com/qleraps/ler2valideringplugin
 # End of mandatory metadata
 
 # Recommended items:
@@ -25,11 +25,11 @@ changelog=Validering af forespørgselsområde og kontaktoplysninger
 # Tags are comma separated with spaces allowed
 tags=ler,ler2,validering
 
-homepage=https://ler2validering.dk
+homepage=https://portal.ler2validering.dk
 category=Web
 icon=icon.png
 # experimental flag
-experimental=False
+experimental=True
 
 # deprecated flag (applies to the whole plugin, not just a single version)
 deprecated=False
