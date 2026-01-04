@@ -27,12 +27,12 @@ from qgis.PyQt.QtWidgets import QDockWidget, QAction, QHBoxLayout, QVBoxLayout,Q
 # Initialize Qt resources from file resources.py
 #from .resources import *
 #from .config import Settings, OptionsFactory
+from .qt_compat import QAction, Qt_TopDockWidgetArea, Qt_BottomDockWidgetArea
 from qgis.gui import QgsOptionsWidgetFactory, QgsOptionsPageWidget
 from qgis.core import *
 # Import the code for the DockWidget
 from .ler2validering_widget import ler2valideringWidget
 import os.path
-from PyQt5 import QtCore, QtWidgets
 
 SETTINGS_WIDGET, BASE  = uic.loadUiType(os.path.join(
     os.path.dirname(__file__), 'ler2validering_settings.ui'))
@@ -114,6 +114,13 @@ class Ler2Validering:
             parent=self.iface.mainWindow()
         )"""
 
+        # Tjek om der allerede findes en dock med dette navn fra en tidligere (fejlet) session
+        for widget in self.iface.mainWindow().findChildren(QDockWidget):
+            if widget.objectName() == "LER2validering":
+                self.iface.removeDockWidget(widget)
+                widget.setParent(None)
+                widget.deleteLater()
+
         self.ler2valideringWidget = ler2valideringWidget(self.iface) #, self.settings
 
 
@@ -128,7 +135,7 @@ class Ler2Validering:
 
         # add the dockwidget to iface
         self.iface.addDockWidget(
-            Qt.BottomDockWidgetArea, self.ler2valideringDockWidget
+            Qt_BottomDockWidgetArea, self.ler2valideringDockWidget
         )
 
         self.options_factory = ler2valideringOptionsFactory()
@@ -144,7 +151,12 @@ class Ler2Validering:
     def unload(self):
         """Removes the plugin menu item and icon from QGIS GUI."""
         #self.lerpluswidget.unload() # try to avoid processing events, when QGIS is closing
-        self.iface.removeDockWidget(self.ler2valideringDockWidget)
+        if self.ler2valideringDockWidget is not None:
+            self.iface.removeDockWidget(self.ler2valideringDockWidget)
+            self.ler2valideringDockWidget.setParent(None)
+            self.ler2valideringDockWidget.deleteLater()
+            self.ler2valideringDockWidget = None
+
         self.iface.unregisterOptionsWidgetFactory(self.options_factory)
         #print("** UNLOAD LerPlusDock")
         # remove the toolbar
@@ -209,20 +221,15 @@ class ler2valideringConfigOptionsPage(QgsOptionsPageWidget, SETTINGS_WIDGET):
         settings = QgsSettings()
 
         self.apitokenEdit.setText(settings.value("ler2validering/apitoken"))
-        if settings.value("ler2validering/debugmode") == "1":
-            #print('s1')
-            self.debugCheckbox.setChecked(True)
-        else:
-
-            #print(settings.value("lerplusdock/debugmode"))
-            self.debugCheckbox.setChecked(False)
+        self.debugCheckbox.setChecked(settings.value("ler2validering/debugmode", False, type=bool))
 
         self.config_widget = ler2valideringConfigOptionsDialog()
-        layout = QVBoxLayout()
+        """layout = QVBoxLayout()
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setMargin(0)
         self.setLayout(layout)
         layout.addWidget(self.config_widget)
+        """
         #layout = QHBoxLayout()
         #layout.setContentsMargins(0, 0, 0, 0)
         #self.setLayout(layout)
@@ -233,12 +240,8 @@ class ler2valideringConfigOptionsPage(QgsOptionsPageWidget, SETTINGS_WIDGET):
         settings = QgsSettings()
         token = self.apitokenEdit.text()
         settings.setValue("ler2validering/apitoken", token)
-        if self.debugCheckbox.checkState() == QtCore.Qt.Checked:
-            #print('1')
-            settings.setValue("ler2validering/debugmode", "1")
-        else:
-            #print('0')
-            settings.setValue("ler2validering/debugmode", "0")
+        settings.setValue("ler2validering/debugmode", self.debugCheckbox.isChecked())
+
         # QMessageBox.information(self, 'API-response', check.str())
         #self.iface.messageBar().pushMessage("Success", "settings saved", level=Qgis.Info, duration=5)
 

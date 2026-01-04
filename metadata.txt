@@ -4,9 +4,9 @@
 
 [general]
 name=LER2 Validering
-qgisMinimumVersion=3.0
+qgisMinimumVersion=3.4
 description=Nem adgang til LER2 validering
-version=0.1.2
+version=0.1.5
 author=qLER ApS
 email=morten@qler.dk
 
@@ -20,7 +20,7 @@ repository=https://github.com/qleraps/ler2valideringplugin
 
 hasProcessingProvider=no
 # Uncomment the following line and add your changelog:
-changelog=Validering af forespørgselsområde og kontaktoplysninger
+changelog=Validerer nu alle features i et layer, hvis intet er valgt.
 
 # Tags are comma separated with spaces allowed
 tags=ler,ler2,validering

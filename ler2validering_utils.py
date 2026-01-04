@@ -1,9 +1,9 @@
 from .ler2validering_config import *
 from qgis.core import *
+from qgis.PyQt.QtWidgets import QApplication, QWidget, QPushButton, QMessageBox, QInputDialog
 import json
 import requests
 import time
-from PyQt5.QtWidgets import QApplication, QWidget, QPushButton, QMessageBox, QInputDialog
 
 
 def is_valid_json(my_string):

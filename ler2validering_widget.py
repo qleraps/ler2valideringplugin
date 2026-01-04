@@ -28,14 +28,15 @@ from qgis.PyQt import QtGui, QtWidgets, uic
 from qgis.PyQt.QtCore import pyqtSignal
 from qgis.PyQt.QtCore import QSettings, QSize
 from qgis.PyQt.QtWidgets import QFrame, QMessageBox, QPushButton
-from PyQt5.QtWidgets import QApplication, QMainWindow, QTableWidget, QTableWidgetItem, QPushButton, QVBoxLayout, QWidget
+from qgis.PyQt.QtWidgets import QApplication, QMainWindow, QTableWidget, QTableWidgetItem, QPushButton, QVBoxLayout, QWidget
 from qgis.PyQt.QtGui import QDesktopServices
-from PyQt5.QtGui import QColor
-from qgis.PyQt.QtCore import Qt, QUrl
+from qgis.PyQt.QtGui import QColor
+from qgis.PyQt.QtCore import Qt, QUrl, QTimer, QDate, QDateTime
 from .ler2validering_utils import *
+from .qt_compat import (Qt_UserRole, Qt_AlignRight, Qt_AlignCenter, Qt_AlignVCenter,
+                        QFrame_StyledPanel, QFrame_Raised)
 from .ler2validering_validate import *
 from datetime import datetime
-from PyQt5.QtCore import QTimer, QDate, QDateTime
 from functools import partial
 #from .lerplusnewsession import LERplusNewSession
 import tempfile
@@ -68,7 +69,7 @@ class ler2valideringWidget(QFrame, FORM_CLASS):
         #self.readconfig()
         self.setupUi(self)
         self.iface = iface
-        self.setFrameStyle(QFrame.StyledPanel + QFrame.Raised)
+        self.setFrameStyle(QFrame_StyledPanel + QFrame_Raised)
 
         #self.settings=settings
         #self.suggester = Suggester(
@@ -99,7 +100,9 @@ class ler2valideringWidget(QFrame, FORM_CLASS):
             pass
         self.resultTable.cellClicked.connect(self.onResultRowClicked)
         self.resultTable.cellDoubleClicked.connect(self.onResultRowDoubleClicked)
-        self.resultTable.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.resultTable.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)  # make it readonly
+
+        self.filterEdit.textChanged.connect(self.filterresulttable)
 
         #self.readconfig()
         #self.updateSessions()
@@ -294,15 +297,27 @@ class ler2valideringWidget(QFrame, FORM_CLASS):
 
         selected_features = list(layer.selectedFeatures())
         if len(selected_features) == 0:
-            QMessageBox.about(self, "Fejl", "Ingen geometri valgt")
-            return
+            reply = QMessageBox.question(
+                self,
+                "Ingen geometri valgt",
+                "Ingen geometri er valgt. Vil du i stedet validere alle features i laget?",
+                QMessageBox.StandardButtons.Yes | QMessageBox.StandardButtons.No,
+                QMessageBox.StandardButtons.No
+            )
+            if reply == QMessageBox.StandardButtons.Yes:
+                selected_features = list(layer.getFeatures())
+                if len(selected_features) == 0:
+                    QMessageBox.about(self, "Fejl", "Laget indeholder ingen features")
+                    return
+            else:
+                return
 
         # Åbn valideringsdialog
         self.validatedialog = ler2valideringWidgetValidateDialog(self)
         self.validatedialog.setIface(self.iface)  # , groupname
         self.validatedialog.setInfo(len(selected_features), self.detectObjectType(selected_features, layer), layer)
 
-        self.validatedialog.exec_()
+        self.validatedialog.exec()
         if not self.validatedialog.isConfirmed():
             return
 
@@ -368,6 +383,7 @@ class ler2valideringWidget(QFrame, FORM_CLASS):
 
 
     def highlighFeatureSingleClick(self, fid, layer):
+       # QMessageBox.information(self, 'clik', 'single')
         canvas = self.iface.mapCanvas()
         f = next(layer.getFeatures(QgsFeatureRequest(fid)), None)
         if f and not canvas.extent().intersects(f.geometry().boundingBox()):
@@ -377,6 +393,7 @@ class ler2valideringWidget(QFrame, FORM_CLASS):
         canvas.flashFeatureIds(layer, [fid])
 
     def highlighFeatureDoubleClick(self, fid, layer):
+        #QMessageBox.information(self, 'clik', 'double')
         canvas = self.iface.mapCanvas()
         canvas.zoomToFeatureIds(layer, [fid])
         canvas.flashFeatureIds(layer, [fid])
@@ -413,27 +430,28 @@ class ler2valideringWidget(QFrame, FORM_CLASS):
             # No layer to highlight on; silently ignore
             return
 
-        if doubleclicked:
+        if doubleclicked is True:
             self.highlighFeatureDoubleClick(fid, layer)
         else:
             self.highlighFeatureSingleClick(fid, layer)
 
     def onResultRowDoubleClicked(self, row):
+        #QMessageBox.information(self, 'clik', 'double')
         self.onResultRowClicked(row, doubleclicked=True)
 
 
     def filterresulttable(self):
-        return
-        filter_text = self.filterEdit.text().lower()
-        columns_to_filter = [0, 6]  # Indices of the columns to filter
 
-        for row in range(self.resulttable.rowCount()):
-            row_data = [self.resulttable.item(row, col).text().lower() if col in columns_to_filter else "" for col in
-                        range(self.resulttable.columnCount())]
+        filter_text = self.filterEdit.text().lower()
+        columns_to_filter = [1,2,3]  # Indices of the columns to filter
+
+        for row in range(self.resultTable.rowCount()):
+            row_data = [self.resultTable.item(row, col).text().lower() if col in columns_to_filter else "" for col in
+                        range(self.resultTable.columnCount())]
             if any(filter_text in cell_data for cell_data in row_data):
-                self.resulttable.setRowHidden(row, False)
+                self.resultTable.setRowHidden(row, False)
             else:
-                self.resulttable.setRowHidden(row, True)
+                self.resultTable.setRowHidden(row, True)
 
     def closeEvent(self, event):
         self.closingPlugin.emit()
@@ -443,12 +461,9 @@ class ler2valideringWidget(QFrame, FORM_CLASS):
     def setIface(self,iface):
         self.iface = iface
 
-    def showSettings(self):
-        self.iface.showOptionsDialog(currentPage="LER2validering")
+    def showSettings(self, checked=False):
+        self.iface.showOptionsDialog(self.iface.mainWindow(), "LER2validering")
         self.checkToken()
-        #self.settings = LERplusSettings()
-        #self.settings.setIface(self.iface)
-        #self.settings.exec_()
 
 
     def checkToken(self):

@@ -7,9 +7,8 @@ import json
 
 from qgis.PyQt import uic
 from qgis.PyQt import QtWidgets
-from qgis.PyQt.QtCore import Qt
-from PyQt5.QtWidgets import QApplication, QWidget, QPushButton, QMessageBox, QInputDialog
-from qgis.PyQt.QtCore import QSettings, QSize
+from qgis.PyQt.QtCore import Qt, QSettings, QSize
+from qgis.PyQt.QtWidgets import QApplication, QWidget, QPushButton, QMessageBox, QInputDialog
 from qgis.core import *
 from qgis.gui import QgsMapCanvas, QgsMapToolPan
 from datetime import date
@@ -109,8 +108,12 @@ class ler2valideringWidgetValidateDialog(QtWidgets.QDialog, FORM_CLASS):
             self.objecttype.setText("Objekttype ikke fundet, der skal vælges en type nedenfor")
             self.objtypeCombo.setEnabled(True)
         else:
-            self.objecttype.setText("Objekttype: " + objecttype)
-            self.objtypeCombo.setEnabled(False)
+            if not isinstance(objecttype, str):
+                self.objecttype.setText("Objekttype har ugyldig værdi, der skal vælges en type nedenfor")
+                self.objtypeCombo.setEnabled(True)
+            else:
+                self.objecttype.setText("Objekttype: " + objecttype)
+                self.objtypeCombo.setEnabled(False)
         self.layername.setText("Layer-navn: " + layer.name())
 
     def getForcedObjType(self):
